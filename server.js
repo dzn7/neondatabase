@@ -31,7 +31,7 @@ const preference = new Preference(client);
 // =========================================================
 const allowedOrigins = [
     'http://127.0.0.1:5500/index.html',
-    'https://acaiemcasasite.onrender.com', //
+    'https://acaiemcasasite.onrender.com',
     'https://edienayteste.onrender.com',
     'http://localhost:3000',
     'http://127.0.0.1:5500',
@@ -139,6 +139,88 @@ app.get('/api/complementos', async (req, res) => {
   }
 });
 
+// NOVO: GET /api/pedidos - Retorna todos os pedidos com seus itens e complementos
+app.get('/api/pedidos', async (req, res) => {
+  try {
+    const querySql = `
+      SELECT
+          p.id_pedido, p.nome_cliente, p.email_cliente, p.tipo_entrega,
+          p.endereco_entrega, p.numero_mesa, p.observacoes, p.metodo_pagamento,
+          p.troco_para, p.valor_total, p.status, p.data_hora_envio,
+          i.id_item_pedido, i.id_produto, i.nome_produto, i.quantidade,
+          i.preco_base_produto, i.preco_unitario_com_complementos, i.total_item_preco,
+          c.id_complemento_disponivel, c.nome_complemento, c.preco_complemento
+      FROM
+          pedidos p
+      LEFT JOIN
+          itens_do_pedido i ON p.id_pedido = i.id_pedido
+      LEFT JOIN
+          complementos_do_item c ON i.id_item_pedido = c.id_item_pedido
+      ORDER BY
+          p.data_hora_envio DESC, i.id_item_pedido, c.id_complemento_disponivel;
+    `;
+    
+    const result = await db.query(querySql);
+    const ordersMap = new Map();
+
+    result.rows.forEach(row => {
+      // Cria ou recupera o objeto do pedido
+      if (!ordersMap.has(row.id_pedido)) {
+        ordersMap.set(row.id_pedido, {
+          orderId: row.id_pedido,
+          customerName: row.nome_cliente,
+          customerEmail: row.email_cliente,
+          deliveryOption: {
+            type: row.tipo_entrega,
+            address: row.endereco_entrega,
+            tableNumber: row.numero_mesa
+          },
+          observations: row.observacoes,
+          paymentMethod: row.metodo_pagamento,
+          trocoPara: row.troco_para,
+          total: row.valor_total,
+          status: row.status,
+          sentAt: row.data_hora_envio,
+          items: []
+        });
+      }
+
+      const order = ordersMap.get(row.id_pedido);
+
+      // Adiciona itens ao pedido, se existirem e ainda não tiverem sido adicionados
+      if (row.id_item_pedido && !order.items.some(item => item.id_item_pedido === row.id_item_pedido)) {
+        order.items.push({
+          id_item_pedido: row.id_item_pedido, // Usar id_item_pedido para identificação interna
+          productId: row.id_produto,
+          name: row.nome_produto, // Mapeia para 'name' como o frontend espera
+          quantity: row.quantidade,
+          basePrice: row.preco_base_produto,
+          unitPriceWithComplements: row.preco_unitario_com_complementos,
+          totalItemPrice: row.total_item_preco,
+          complements: [] // Inicializa array de complementos para este item
+        });
+      }
+
+      const currentItem = order.items.find(item => item.id_item_pedido === row.id_item_pedido);
+
+      // Adiciona complementos ao item, se existirem e ainda não tiverem sido adicionados
+      if (row.id_complemento_disponivel && currentItem && !currentItem.complements.some(comp => comp.id === row.id_complemento_disponivel)) {
+        currentItem.complements.push({
+          id: row.id_complemento_disponivel,
+          name: row.nome_complemento, // Mapeia para 'name'
+          price: parseFloat(row.preco_complemento) // Certificar que o preço é numérico
+        });
+      }
+    });
+
+    res.status(200).json(Array.from(ordersMap.values()));
+  } catch (error) {
+    console.error('Erro ao buscar pedidos do Neon:', error);
+    res.status(500).json({ message: 'Erro ao buscar pedidos.', error: error.message });
+  }
+});
+
+
 // POST /api/pedidos - Recebe e salva um novo pedido no Neon
 app.post('/api/pedidos', async (req, res) => {
   const client = await db.getClient();
@@ -184,7 +266,7 @@ app.post('/api/pedidos', async (req, res) => {
       const itemResult = await client.query(insertItemSql, [
         orderId,
         item.productId,
-        item.name,
+        item.name, // Já vem como 'name' do frontend
         item.quantity,
         item.basePrice,
         item.unitPriceWithComplements,
@@ -201,7 +283,7 @@ app.post('/api/pedidos', async (req, res) => {
         await client.query(insertCompSql, [
           insertedItemId,
           comp.id,
-          comp.name,
+          comp.name, // Já vem como 'name' do frontend
           comp.price
         ]);
       }
@@ -214,6 +296,46 @@ app.post('/api/pedidos', async (req, res) => {
     await client.query('ROLLBACK');
     console.error('Erro ao salvar pedido no Neon:', error);
     res.status(500).json({ message: 'Erro ao salvar pedido.', error: error.message });
+  } finally {
+    client.release();
+  }
+});
+
+
+// NOVO: PUT /api/pedidos - Atualiza o status de pedidos no Neon
+// Este endpoint espera um array de objetos de pedido com 'orderId' e 'status'
+app.put('/api/pedidos', async (req, res) => {
+  const client = await db.getClient();
+  try {
+    await client.query('BEGIN'); // Inicia a transação
+
+    const updatedOrders = req.body; // Espera um array de pedidos do dashboard
+
+    if (!Array.isArray(updatedOrders)) {
+      throw new Error('Corpo da requisição para PUT /api/pedidos deve ser um array de pedidos.');
+    }
+
+    // Itera sobre cada pedido recebido e atualiza seu status no banco de dados
+    for (const order of updatedOrders) {
+      if (order.orderId && order.status) {
+        const updateSql = `
+          UPDATE pedidos
+          SET status = $1
+          WHERE id_pedido = $2;
+        `;
+        await client.query(updateSql, [order.status, order.orderId]);
+      } else {
+        console.warn(`Pedido inválido encontrado na atualização PUT: ${JSON.stringify(order)}`);
+      }
+    }
+
+    await client.query('COMMIT');
+    res.status(200).json({ message: 'Status dos pedidos atualizados com sucesso!' });
+
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Erro ao atualizar status dos pedidos no Neon:', error);
+    res.status(500).json({ message: 'Erro ao atualizar status dos pedidos.', error: error.message });
   } finally {
     client.release();
   }
