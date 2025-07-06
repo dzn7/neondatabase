@@ -120,6 +120,55 @@ app.get('/api/produtos', async (req, res) => {
   }
 });
 
+// **** ROTA ADICIONADA ****
+// PUT /api/produtos - Substitui todos os produtos pelos novos dados vindos do painel
+app.put('/api/produtos', async (req, res) => {
+  const allProducts = req.body;
+  const client = await db.getClient();
+
+  try {
+    await client.query('BEGIN'); // Inicia a transação
+
+    // Limpa a tabela de produtos para inserir os novos
+    // RESTART IDENTITY reinicia a contagem do ID autoincremental, o que é uma boa prática.
+    await client.query('TRUNCATE TABLE produtos RESTART IDENTITY');
+
+    // Prepara a query de inserção
+    const insertQuery = `
+      INSERT INTO produtos (id, nome, descricao, preco, categoria, imagem_url, num_complementos_gratis)
+      VALUES ($1, $2, $3, $4, $5, $6, $7)
+    `;
+
+    // Itera sobre cada categoria e produto para inserir no banco
+    for (const categoryKey in allProducts) {
+      const productsInCategory = allProducts[categoryKey];
+      for (const product of productsInCategory) {
+        const productValues = [
+          product.id,
+          product.nome,
+          product.descricao || null,
+          product.preco,
+          categoryKey,
+          product.imagem_url || null,
+          product.num_complementos_gratis || 0
+        ];
+        await client.query(insertQuery, productValues);
+      }
+    }
+
+    await client.query('COMMIT'); // Finaliza a transação com sucesso
+    res.status(200).json({ message: 'Produtos atualizados com sucesso!' });
+
+  } catch (error) {
+    await client.query('ROLLBACK'); // Desfaz a transação em caso de erro
+    console.error('Erro ao atualizar produtos no Neon DB:', error);
+    res.status(500).json({ message: 'Erro ao atualizar os produtos.', error: error.message });
+  } finally {
+    client.release(); // Libera o cliente de volta para o pool de conexões
+  }
+});
+
+
 // GET /api/complementos - Retorna todos os complementos disponíveis do Neon
 app.get('/api/complementos', async (req, res) => {
   try {
@@ -139,7 +188,7 @@ app.get('/api/complementos', async (req, res) => {
   }
 });
 
-// NOVO: GET /api/pedidos - Retorna todos os pedidos com seus itens e complementos
+// GET /api/pedidos - Retorna todos os pedidos com seus itens e complementos
 app.get('/api/pedidos', async (req, res) => {
   try {
     const querySql = `
@@ -302,8 +351,7 @@ app.post('/api/pedidos', async (req, res) => {
 });
 
 
-// NOVO: PUT /api/pedidos - Atualiza o status de pedidos no Neon
-// Este endpoint espera um array de objetos de pedido com 'orderId' e 'status'
+// PUT /api/pedidos - Atualiza o status de pedidos no Neon (usado pelo Dashboard do Dono)
 app.put('/api/pedidos', async (req, res) => {
   const client = await db.getClient();
   try {
