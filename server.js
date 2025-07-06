@@ -30,7 +30,7 @@ const preference = new Preference(client);
 // CONFIGURAÇÃO DE CORS (Permite múltiplos domínios para segurança)
 // =========================================================
 const allowedOrigins = [
-    'http://127.0.0.1:5500/index.html'
+    'http://127.0.0.1:5500/index.html',
     'https://acaiemcasasite.onrender.com', //
     'https://edienayteste.onrender.com',
     'http://localhost:3000',
